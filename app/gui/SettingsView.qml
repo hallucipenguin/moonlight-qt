@@ -58,6 +58,14 @@ Flickable {
         else {
             audioDropThresholdField.text = StreamingPreferences.audioDropThresholdMs.toString()
         }
+
+        if (audioDrainThresholdField.acceptableInput) {
+            StreamingPreferences.audioDrainThresholdMs = parseInt(audioDrainThresholdField.text)
+            audioDrainThresholdField.text = StreamingPreferences.audioDrainThresholdMs.toString()
+        }
+        else {
+            audioDrainThresholdField.text = StreamingPreferences.audioDrainThresholdMs.toString()
+        }
     }
 
     Window.onActiveFocusItemChanged: {
@@ -1000,6 +1008,31 @@ Flickable {
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
                     ToolTip.text: qsTr("SDL audio only. Default: 30 ms. Increase this if you want Moonlight to tolerate more queued audio before dropping new samples.")
+                }
+
+                Label {
+                    width: parent.width
+                    text: qsTr("SDL audio: drain queued audio back down to (ms, 0 = off)")
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                TextField {
+                    id: audioDrainThresholdField
+                    width: Math.min(parent.width, 120)
+                    text: StreamingPreferences.audioDrainThresholdMs.toString()
+                    maximumLength: 4
+                    inputMethodHints: Qt.ImhDigitsOnly
+                    validator: IntValidator { bottom: 0; top: 1000 }
+
+                    onEditingFinished: {
+                        commitAudioThresholdSettings()
+                    }
+
+                    ToolTip.delay: 1000
+                    ToolTip.timeout: 5000
+                    ToolTip.visible: hovered
+                    ToolTip.text: qsTr("SDL audio only. Default: 0 ms (off). A queue that grows during a network burst otherwise stays full, leaving audio permanently late. Set this below the maximum above and Moonlight will slowly shed audio to bring the queue back down to it once the network is calm, keeping the burst tolerance without the lasting delay.")
                 }
 
                 CheckBox {

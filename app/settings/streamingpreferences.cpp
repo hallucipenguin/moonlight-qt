@@ -53,6 +53,7 @@
 #define SER_AUDIOPLAYBACKTHRESHOLDMS "audioplaybackthresholdms"
 #define SER_AUDIODROPTHRESHOLDMS "audiodropthresholdms"
 #define SER_AUDIOQUEUETHRESHOLDMS "audioqueuethresholdms"
+#define SER_AUDIODRAINTHRESHOLDMS "audiodrainthresholdms"
 #define SER_LANGUAGE "language"
 #define SER_RENDERER "renderer"
 
@@ -63,6 +64,8 @@ constexpr int kDefaultAudioPlaybackThresholdMs = 0;
 constexpr int kDefaultAudioDropThresholdMs = 30;
 constexpr int kMinimumAudioPlaybackThresholdMs = 0;
 constexpr int kMinimumAudioDropThresholdMs = 1;
+constexpr int kDefaultAudioDrainThresholdMs = 0;
+constexpr int kMinimumAudioDrainThresholdMs = 0;
 constexpr int kMaximumAudioThresholdMs = 1000;
 
 int clampAudioPlaybackThreshold(int value)
@@ -73,6 +76,11 @@ int clampAudioPlaybackThreshold(int value)
 int clampAudioDropThreshold(int value)
 {
     return qBound(kMinimumAudioDropThresholdMs, value, kMaximumAudioThresholdMs);
+}
+
+int clampAudioDrainThreshold(int value)
+{
+    return qBound(kMinimumAudioDrainThresholdMs, value, kMaximumAudioThresholdMs);
 }
 }
 
@@ -177,6 +185,8 @@ void StreamingPreferences::reload()
     audioDropThresholdMs = clampAudioDropThreshold(settings.value(SER_AUDIODROPTHRESHOLDMS,
                                                                   settings.value(SER_AUDIOQUEUETHRESHOLDMS,
                                                                                  kDefaultAudioDropThresholdMs).toInt()).toInt());
+    audioDrainThresholdMs = clampAudioDrainThreshold(settings.value(SER_AUDIODRAINTHRESHOLDMS,
+                                                                    kDefaultAudioDrainThresholdMs).toInt());
     enableHdr = settings.value(SER_HDR, false).toBool();
     captureSysKeysMode = static_cast<CaptureSysKeysMode>(settings.value(SER_CAPTURESYSKEYS,
                                                          static_cast<int>(CaptureSysKeysMode::CSK_OFF)).toInt());
@@ -391,6 +401,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_AUDIOPLAYBACKTHRESHOLDMS, clampAudioPlaybackThreshold(audioPlaybackThresholdMs));
     settings.setValue(SER_AUDIODROPTHRESHOLDMS, clampAudioDropThreshold(audioDropThresholdMs));
     settings.setValue(SER_AUDIOQUEUETHRESHOLDMS, clampAudioDropThreshold(audioDropThresholdMs));
+    settings.setValue(SER_AUDIODRAINTHRESHOLDMS, clampAudioDrainThreshold(audioDrainThresholdMs));
 }
 
 int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool yuv444)

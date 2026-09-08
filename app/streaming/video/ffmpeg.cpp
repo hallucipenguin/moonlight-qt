@@ -2,6 +2,7 @@
 #include "ffmpeg.h"
 #include "utils.h"
 #include "streaming/session.h"
+#include "streaming/audio/renderers/renderer.h"
 
 #include <h264_stream.h>
 
@@ -974,12 +975,31 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
 
         offset += ret;
     }
+
+    // Audio queue depth. This is not a video stat, but it is reported here so
+    // it appears both on the stats overlay and in the end-of-session log.
+    // The peak is the number that matters: a backlog that climbs and stays put
+    // is latency we are carrying for no reason.
+    ret = snprintf(&output[offset],
+                   length - offset,
+                   "Audio queue: %d ms (peak %d ms)\n"
+                   "Audio frames dropped: %d over threshold, %d drained\n",
+                   LiGetPendingAudioDuration(),
+                   AudioStats::pendingPeakMs.load(std::memory_order_relaxed),
+                   AudioStats::hardDrops.load(std::memory_order_relaxed),
+                   AudioStats::drainDrops.load(std::memory_order_relaxed));
+    if (ret < 0 || ret >= length - offset) {
+        SDL_assert(false);
+        return;
+    }
+
+    offset += ret;
 }
 
 void FFmpegVideoDecoder::logVideoStats(VIDEO_STATS& stats, const char* title)
 {
     if (stats.renderedFps > 0 || stats.renderedFrames != 0) {
-        char videoStatsStr[512];
+        char videoStatsStr[768];
         stringifyVideoStats(stats, videoStatsStr, sizeof(videoStatsStr));
 
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,

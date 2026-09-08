@@ -3,6 +3,8 @@
 #include <Limelight.h>
 #include <QtGlobal>
 
+#include <atomic>
+
 class IAudioRenderer
 {
 public:
@@ -42,3 +44,15 @@ public:
         }
     }
 };
+
+// Diagnostic counters for the audio queue, surfaced by the on-screen stats
+// overlay (Ctrl+Alt+Shift+S). These are written from the audio thread and read
+// from the render thread, so they are atomic; relaxed ordering is fine because
+// nothing is synchronized through them.
+namespace AudioStats {
+    extern std::atomic<int> pendingPeakMs;  // high-water mark of LiGetPendingAudioDuration()
+    extern std::atomic<int> hardDrops;      // frames discarded at the drop threshold
+    extern std::atomic<int> drainDrops;     // frames discarded to walk the backlog down
+
+    void reset();
+}
