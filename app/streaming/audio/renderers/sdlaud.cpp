@@ -3,30 +3,40 @@
 #include <Limelight.h>
 
 namespace AudioStats {
+    std::atomic<int> pendingMs(0);
+    std::atomic<int> sdlQueuedMs(0);
     std::atomic<int> pendingPeakMs(0);
+    std::atomic<int> totalPeakMs(0);
     std::atomic<int> hardDrops(0);
     std::atomic<int> drainDrops(0);
+    std::atomic<uint32_t> lastSampleTicks(0);
     std::atomic<int> dropThresholdMs(0);
     std::atomic<int> drainThresholdMs(0);
 
     void reset()
     {
+        pendingMs.store(0, std::memory_order_relaxed);
+        sdlQueuedMs.store(0, std::memory_order_relaxed);
         pendingPeakMs.store(0, std::memory_order_relaxed);
+        totalPeakMs.store(0, std::memory_order_relaxed);
         hardDrops.store(0, std::memory_order_relaxed);
         drainDrops.store(0, std::memory_order_relaxed);
+        lastSampleTicks.store(0, std::memory_order_relaxed);
     }
 }
 
 namespace {
-    // The backlog must sit above the drain threshold this long before we touch
+    // The backlog must sit above the drain target this long before we touch
     // it. This is what distinguishes a burst being absorbed (leave it alone,
     // that is the whole point of the drop threshold) from a backlog we are
     // still carrying long after the burst that created it.
     constexpr Uint32 kDrainDwellMs = 2000;
 
     // At most one frame is shed per interval, so latency walks down gently
-    // rather than jumping. One packet is 5 ms normally and 10 ms on low-bitrate
-    // streams (see AudioPacketDuration), so this drains 10-20 ms per second.
+    // rather than jumping. In quiet audio that is one packet (5 ms normally,
+    // 10 ms on low-bitrate streams, see AudioPacketDuration) per interval, so
+    // 10-20 ms per second. In continuously loud audio each cut first waits
+    // out the kDrainForceMs search below, so about one packet per 2.5 s.
     constexpr Uint32 kDrainIntervalMs = 500;
 
     // If no quiet frame turns up within this long of looking, shed a loud one
@@ -34,10 +44,14 @@ namespace {
     // a single-packet splice well enough.
     constexpr Uint32 kDrainForceMs = 2000;
 
-    // Arm the drain only once the backlog is this many packets above the
-    // target, and disarm at the target. Without the deadband the one-packet
-    // jitter of ordinary thread scheduling would trigger a pointless drop
-    // every few seconds forever.
+    // The backlog sampled in submitAudio() wobbles by up to one device chunk
+    // (the device pulls that much at a time) plus a packet or so of thread
+    // scheduling and whole-packet rounding. Arm the drain only once the
+    // backlog is a chunk plus this many packets above the target, and disarm
+    // at the target. Without the deadband that wobble would trigger a
+    // pointless drop every few seconds forever. The same margin is the floor
+    // for the target itself: any lower and a single device pull could empty
+    // SDL's queue and leave a gap.
     constexpr int kDrainArmPackets = 2;
 
     // Peak sample magnitude (of full scale) below which removing a frame is
@@ -54,26 +68,20 @@ SdlAudioRenderer::SdlAudioRenderer(int audioPlaybackThresholdMs, int audioDropTh
       m_AudioPlaybackThresholdMs(SDL_max(0, audioPlaybackThresholdMs)),
       m_AudioDropThresholdMs(SDL_max(1, audioDropThresholdMs)),
       m_AudioDrainThresholdMs(SDL_max(0, audioDrainThresholdMs)),
+      m_DrainTargetMs(0),
+      m_DrainArmMarginMs(0),
+      m_DeviceChunkMs(0),
+      m_MaxQueuedAudioMs(0),
       m_BacklogHighSinceMs(0),
       m_LastDrainMs(0),
       m_DrainSearchSinceMs(0),
       m_WaitingForPlaybackThreshold(audioPlaybackThresholdMs > 0)
 {
-    // The drain has room to work only below the drop threshold, because
-    // submitAudio() returns early above it. A value at or above the drop
-    // threshold is not a gentler setting, it is an inert one, so refuse it
-    // loudly rather than leave the user wondering why nothing happens.
-    if (m_AudioDrainThresholdMs > 0 && m_AudioDrainThresholdMs >= m_AudioDropThresholdMs) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
-                    "Audio drain threshold (%d ms) must be below the drop threshold (%d ms). "
-                    "Disabling drain.",
-                    m_AudioDrainThresholdMs,
-                    m_AudioDropThresholdMs);
-        m_AudioDrainThresholdMs = 0;
-    }
-
     AudioStats::dropThresholdMs.store(m_AudioDropThresholdMs, std::memory_order_relaxed);
-    AudioStats::drainThresholdMs.store(m_AudioDrainThresholdMs, std::memory_order_relaxed);
+
+    // The effective drain target is settled in configureDrain() once the
+    // packet and device chunk sizes are known. Until then report it as off.
+    AudioStats::drainThresholdMs.store(0, std::memory_order_relaxed);
 
     SDL_assert(!SDL_WasInit(SDL_INIT_AUDIO));
 
@@ -116,6 +124,8 @@ bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* 
 
     m_BytesPerMs = SDL_max(1, (have.freq * have.channels * getAudioBufferSampleSize()) / 1000);
 
+    configureDrain(have);
+
     m_AudioBuffer = SDL_malloc(m_FrameSize);
     if (m_AudioBuffer == nullptr) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -146,6 +156,74 @@ bool SdlAudioRenderer::prepareForPlayback(const OPUS_MULTISTREAM_CONFIGURATION* 
     return true;
 }
 
+// Settle the drain parameters now that the packet size and the device's pull
+// size are known. Everything here is derived from the obtained SDL_AudioSpec,
+// so it is right for whatever device actually opened rather than assumed.
+void SdlAudioRenderer::configureDrain(const SDL_AudioSpec& have)
+{
+    // The device pulls this much per callback, so SDL's queue (and the total
+    // sampled in submitAudio()) naturally wobbles by this amount.
+    m_DeviceChunkMs = (Uint32)SDL_max(1, (int)have.samples / SDL_max(1, have.freq / 1000));
+
+    // The backpressure loop in submitAudio() caps SDL's queue here. The
+    // common-c queue only starts filling once SDL is at this cap.
+    m_MaxQueuedAudioMs = (Uint32)SDL_max(50, m_AudioPlaybackThresholdMs);
+
+    m_DrainArmMarginMs = (int)m_DeviceChunkMs + kDrainArmPackets * (int)m_FrameDurationMs;
+    m_DrainTargetMs = 0;
+
+    if (m_AudioDrainThresholdMs > 0) {
+        int target = m_AudioDrainThresholdMs;
+
+        // Floor: keep at least one device pull plus a couple of packets in
+        // hand at the target, or every callback risks an underrun there. With
+        // a playback threshold in use, stay above it as well, or a hiccup
+        // becomes a pause-and-refill instead of a short glitch.
+        int floorMs = m_DrainArmMarginMs;
+        if (m_AudioPlaybackThresholdMs > 0) {
+            floorMs = SDL_max(floorMs, m_AudioPlaybackThresholdMs + (int)m_DeviceChunkMs);
+        }
+        if (target < floorMs) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Audio drain target %d ms is too low for this device. Raising it to %d ms.",
+                        target,
+                        floorMs);
+            target = floorMs;
+        }
+
+        // Ceiling: the total can never exceed SDL's cap plus the drop
+        // threshold, because anything beyond that is hard-dropped before the
+        // drain runs. A target that cannot be armed within that range is not
+        // a gentler setting, it is an inert one, so refuse it loudly rather
+        // than leave the user wondering why nothing happens.
+        int ceilingMs = (int)m_MaxQueuedAudioMs + m_AudioDropThresholdMs;
+        if (target + m_DrainArmMarginMs >= ceilingMs) {
+            SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                        "Audio drain target %d ms can never trigger: the backlog is capped at "
+                        "%d ms and the drain arms %d ms above its target. Disabling drain.",
+                        target,
+                        ceilingMs,
+                        m_DrainArmMarginMs);
+            target = 0;
+        }
+
+        m_DrainTargetMs = target;
+    }
+
+    if (m_DrainTargetMs > 0) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Audio drain: target %d ms total, arms above %d ms "
+                    "(device chunk %u ms, packet %u ms, SDL cap %u ms)",
+                    m_DrainTargetMs,
+                    m_DrainTargetMs + m_DrainArmMarginMs,
+                    m_DeviceChunkMs,
+                    m_FrameDurationMs,
+                    m_MaxQueuedAudioMs);
+    }
+
+    AudioStats::drainThresholdMs.store(m_DrainTargetMs, std::memory_order_relaxed);
+}
+
 SdlAudioRenderer::~SdlAudioRenderer()
 {
     if (m_AudioDevice != 0) {
@@ -169,20 +247,32 @@ void* SdlAudioRenderer::getAudioBuffer(int*)
 
 bool SdlAudioRenderer::submitAudio(int bytesWritten)
 {
+    // Sample both queues together, before any early return below, so the
+    // overlay sees the backlog even while frames are being dropped. The
+    // common-c queue only fills once SDL's queue is at its cap, so the sum is
+    // the real backlog; either one alone hides the other's share.
+    int pendingMs = LiGetPendingAudioDuration();
+    int sdlMs = (int)(SDL_GetQueuedAudioSize(m_AudioDevice) / m_FrameSize * m_FrameDurationMs);
+    int totalMs = pendingMs + sdlMs;
+    Uint32 now = SDL_GetTicks();
+
+    AudioStats::pendingMs.store(pendingMs, std::memory_order_relaxed);
+    AudioStats::sdlQueuedMs.store(sdlMs, std::memory_order_relaxed);
+    AudioStats::lastSampleTicks.store((now == 0) ? 1 : now, std::memory_order_relaxed);
+
+    // Track the high-water marks here rather than sampling once per second
+    // from the render thread, which would miss the bursts entirely. This
+    // thread is the only writer, so a plain compare and store is enough.
+    if (pendingMs > AudioStats::pendingPeakMs.load(std::memory_order_relaxed)) {
+        AudioStats::pendingPeakMs.store(pendingMs, std::memory_order_relaxed);
+    }
+    if (totalMs > AudioStats::totalPeakMs.load(std::memory_order_relaxed)) {
+        AudioStats::totalPeakMs.store(totalMs, std::memory_order_relaxed);
+    }
+
     if (bytesWritten == 0) {
         // Nothing to do
         return true;
-    }
-
-    int pendingMs = LiGetPendingAudioDuration();
-
-    // Track the high-water mark for the stats overlay. Sampling this once per
-    // second from the render thread would miss the bursts entirely.
-    int oldPeak = AudioStats::pendingPeakMs.load(std::memory_order_relaxed);
-    while (pendingMs > oldPeak &&
-           !AudioStats::pendingPeakMs.compare_exchange_weak(oldPeak, pendingMs,
-                                                            std::memory_order_relaxed)) {
-        // compare_exchange_weak refreshes oldPeak on failure
     }
 
     // Don't queue if there's already more than the configured amount of audio
@@ -195,33 +285,35 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
     // Walk a persistent backlog back down.
     //
     // Audio arrives and plays at real time, so a backlog is conserved once
-    // created: only discarding drains it. That makes the queue depth ratchet
-    // upward with each burst and stay there, which is pure latency with no
-    // benefit once the burst that caused it is long gone. When the backlog has
-    // been above the drain threshold for a while, shed a single frame at a
-    // controlled rate so latency drifts back down without the burst tolerance
-    // of the drop threshold being given up.
+    // created: only discarding drains it. That makes the total backlog
+    // ratchet upward with each burst and stay there, which is pure latency
+    // with no benefit once the burst that caused it is long gone. When the
+    // total has been above the drain target for a while, shed a single frame
+    // at a controlled rate so latency drifts back down without the burst
+    // tolerance of the drop threshold being given up.
     //
-    // Dropping here (before the backpressure loop below) is what actually
-    // drains the queue: the decoder thread does not wait on this frame, so it
-    // picks up the next packet immediately.
-    if (m_AudioDrainThresholdMs > 0) {
-        Uint32 now = SDL_GetTicks();
-
+    // The total is what matters, not the common-c queue alone: a backlog
+    // smaller than SDL's cap lives entirely in SDL's queue, and skipping a
+    // frame shrinks that just the same, because the device keeps playing
+    // while one packet's worth of audio is never queued behind it.
+    //
+    // Dropping here (before the backpressure loop below) is what makes that
+    // work when the common-c queue is the one holding the backlog: the
+    // decoder thread does not wait on this frame, so it picks up the next
+    // packet immediately.
+    if (m_DrainTargetMs > 0) {
         // Arm above the target by a margin but only disarm at the target
-        // itself. The deadband matters: the queue depth jitters by a packet
-        // either way just from thread scheduling, so arming and disarming on
-        // the same value would shed a frame every few seconds indefinitely
-        // without ever lowering latency.
-        int armAboveMs = m_AudioDrainThresholdMs + (kDrainArmPackets * (int)m_FrameDurationMs);
-
-        if (pendingMs > armAboveMs) {
+        // itself. The deadband matters: the sampled total wobbles by up to a
+        // device chunk plus a packet just from timing, so arming and
+        // disarming on the same value would shed a frame every few seconds
+        // indefinitely without ever lowering latency.
+        if (totalMs > m_DrainTargetMs + m_DrainArmMarginMs) {
             if (m_BacklogHighSinceMs == 0) {
                 // Start the dwell timer. Bias off zero, the "not high" sentinel.
                 m_BacklogHighSinceMs = (now == 0) ? 1 : now;
             }
         }
-        else if (pendingMs <= m_AudioDrainThresholdMs) {
+        else if (totalMs <= m_DrainTargetMs) {
             // Back at the target, so a later rise starts a fresh dwell.
             m_BacklogHighSinceMs = 0;
             m_DrainSearchSinceMs = 0;
@@ -255,7 +347,6 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
     //
     // The queue must be allowed to reach the playback threshold, otherwise we
     // could never buffer enough audio to start or resume playback.
-    Uint32 maxQueuedAudioMs = (Uint32)SDL_max(50, m_AudioPlaybackThresholdMs);
     for (int i = 0; i < 100; i++) {
         // Our device may enter a permanent error status upon removal, so we need
         // to recreate the audio device to pick up the new default audio device.
@@ -264,7 +355,7 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
         }
 
         // Only queue more samples when SDL's queue is at or below the maximum
-        if (SDL_GetQueuedAudioSize(m_AudioDevice) / m_FrameSize * m_FrameDurationMs <= maxQueuedAudioMs) {
+        if (SDL_GetQueuedAudioSize(m_AudioDevice) / m_FrameSize * m_FrameDurationMs <= m_MaxQueuedAudioMs) {
             break;
         }
 

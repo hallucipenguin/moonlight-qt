@@ -976,27 +976,64 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
         offset += ret;
     }
 
-    // Audio queue depth. This is not a video stat, but it is reported here so
-    // it appears both on the stats overlay and in the end-of-session log.
-    // The peak is the number that matters: a backlog that climbs and stays put
-    // is latency we are carrying for no reason.
-    char drainStr[16];
-    int drainMs = AudioStats::drainThresholdMs.load(std::memory_order_relaxed);
-    if (drainMs > 0) {
-        snprintf(drainStr, sizeof(drainStr), "%d ms", drainMs);
+    // Audio backlog. This is not a video stat, but it is reported here so it
+    // appears both on the stats overlay and in the end-of-session log. Audio
+    // waits in two queues (Moonlight's and SDL's) and the peak of their sum is
+    // the number that matters: a backlog that climbs and stays put is latency
+    // we are carrying for no reason. The audio thread samples both together;
+    // if it has not done so recently (mute, device loss, host silence) say so
+    // rather than present a frozen number as if it were live.
+    int totalPeakMs = AudioStats::totalPeakMs.load(std::memory_order_relaxed);
+    int pendingPeakMs = AudioStats::pendingPeakMs.load(std::memory_order_relaxed);
+    Uint32 lastSample = AudioStats::lastSampleTicks.load(std::memory_order_relaxed);
+    Uint32 sampleAge = SDL_GetTicks() - lastSample;
+    if (lastSample != 0 && sampleAge <= 1000) {
+        int pendingNow = AudioStats::pendingMs.load(std::memory_order_relaxed);
+        int sdlNow = AudioStats::sdlQueuedMs.load(std::memory_order_relaxed);
+        ret = snprintf(&output[offset],
+                       length - offset,
+                       "Audio backlog: %d ms (peak %d) = Moonlight %d ms (peak %d) + SDL %d ms\n",
+                       pendingNow + sdlNow,
+                       totalPeakMs,
+                       pendingNow,
+                       pendingPeakMs,
+                       sdlNow);
+    }
+    else if (lastSample != 0) {
+        ret = snprintf(&output[offset],
+                       length - offset,
+                       "Audio backlog: no sample for %u s (peak %d ms, Moonlight peak %d ms)\n",
+                       sampleAge / 1000,
+                       totalPeakMs,
+                       pendingPeakMs);
     }
     else {
-        snprintf(drainStr, sizeof(drainStr), "off");
+        ret = snprintf(&output[offset],
+                       length - offset,
+                       "Audio backlog: no audio sampled yet\n");
+    }
+    if (ret < 0 || ret >= length - offset) {
+        SDL_assert(false);
+        return;
+    }
+
+    offset += ret;
+
+    char drainStr[32];
+    int drainMs = AudioStats::drainThresholdMs.load(std::memory_order_relaxed);
+    if (drainMs > 0) {
+        snprintf(drainStr, sizeof(drainStr), "drain total to %d ms", drainMs);
+    }
+    else {
+        snprintf(drainStr, sizeof(drainStr), "drain off");
     }
 
     ret = snprintf(&output[offset],
                    length - offset,
-                   "Audio queue: %d ms (peak %d ms), limits: drain %s / drop %d ms\n"
+                   "Audio limits: drop above %d ms in Moonlight, %s\n"
                    "Audio frames dropped: %d over threshold, %d drained\n",
-                   LiGetPendingAudioDuration(),
-                   AudioStats::pendingPeakMs.load(std::memory_order_relaxed),
-                   drainStr,
                    AudioStats::dropThresholdMs.load(std::memory_order_relaxed),
+                   drainStr,
                    AudioStats::hardDrops.load(std::memory_order_relaxed),
                    AudioStats::drainDrops.load(std::memory_order_relaxed));
     if (ret < 0 || ret >= length - offset) {
@@ -1010,7 +1047,7 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
 void FFmpegVideoDecoder::logVideoStats(VIDEO_STATS& stats, const char* title)
 {
     if (stats.renderedFps > 0 || stats.renderedFrames != 0) {
-        char videoStatsStr[1024];
+        char videoStatsStr[2048];
         stringifyVideoStats(stats, videoStatsStr, sizeof(videoStatsStr));
 
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,

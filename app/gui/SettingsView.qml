@@ -1012,7 +1012,7 @@ Flickable {
 
                 Label {
                     width: parent.width
-                    text: qsTr("SDL audio: drain queued audio back down to (ms, 0 = off)")
+                    text: qsTr("SDL audio: drain total buffered audio back down to (ms, 0 = off)")
                     font.pointSize: 12
                     wrapMode: Text.Wrap
                 }
@@ -1032,7 +1032,7 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("SDL audio only. Default: 0 ms (off). A queue that grows during a network burst otherwise stays full, leaving audio permanently late. Set this below the maximum above and Moonlight will slowly shed audio to bring the queue back down to it once the network is calm, keeping the burst tolerance without the lasting delay. Must be lower than the maximum above or it is ignored. The queue moves in whole packets of 5-10 ms, so the value is approximate.")
+                    ToolTip.text: qsTr("SDL audio only. Default: 0 ms (off). After a network burst the buffered audio stays high, so everything you hear is permanently late. Set a target and, once the total buffered audio (Moonlight's buffer plus SDL's queue) has stayed above it for a couple of seconds, Moonlight sheds one packet every half second, preferring quiet ones, until it is back at the target. This keeps the burst tolerance of the maximum above without the lasting delay. Keep it below the maximum above, and not lower than about 25 ms (more on low-bitrate streams or with a playback threshold set); Moonlight raises it if needed. Audio moves in whole packets of 5-10 ms, so the value is approximate. The on-screen stats (Ctrl+Alt+Shift+S) show the value actually in force.")
                 }
 
                 CheckBox {
