@@ -1032,7 +1032,7 @@ Flickable {
                     ToolTip.delay: 1000
                     ToolTip.timeout: 5000
                     ToolTip.visible: hovered
-                    ToolTip.text: qsTr("SDL audio only. Default: 0 ms (off). A queue that grows during a network burst otherwise stays full, leaving audio permanently late. Set this below the maximum above and Moonlight will slowly shed audio to bring the queue back down to it once the network is calm, keeping the burst tolerance without the lasting delay.")
+                    ToolTip.text: qsTr("SDL audio only. Default: 0 ms (off). A queue that grows during a network burst otherwise stays full, leaving audio permanently late. Set this below the maximum above and Moonlight will slowly shed audio to bring the queue back down to it once the network is calm, keeping the burst tolerance without the lasting delay. Must be lower than the maximum above or it is ignored. The queue moves in whole packets of 5-10 ms, so the value is approximate.")
                 }
 
                 CheckBox {

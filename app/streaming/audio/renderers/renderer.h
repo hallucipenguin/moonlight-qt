@@ -46,13 +46,20 @@ public:
 };
 
 // Diagnostic counters for the audio queue, surfaced by the on-screen stats
-// overlay (Ctrl+Alt+Shift+S). These are written from the audio thread and read
-// from the render thread, so they are atomic; relaxed ordering is fine because
-// nothing is synchronized through them.
+// overlay (Ctrl+Alt+Shift+S). Written from the audio decode thread and read
+// from the video depacketizer and main threads, so they are atomic; relaxed
+// ordering is fine because nothing is synchronized through them and each is
+// read independently.
 namespace AudioStats {
     extern std::atomic<int> pendingPeakMs;  // high-water mark of LiGetPendingAudioDuration()
     extern std::atomic<int> hardDrops;      // frames discarded at the drop threshold
     extern std::atomic<int> drainDrops;     // frames discarded to walk the backlog down
+
+    // The thresholds actually in force, so the overlay can show whether the
+    // configured settings reached this stream. They only take effect when a
+    // stream starts, which is easy to forget.
+    extern std::atomic<int> dropThresholdMs;
+    extern std::atomic<int> drainThresholdMs;
 
     void reset();
 }

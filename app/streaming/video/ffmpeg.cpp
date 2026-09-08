@@ -980,12 +980,23 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
     // it appears both on the stats overlay and in the end-of-session log.
     // The peak is the number that matters: a backlog that climbs and stays put
     // is latency we are carrying for no reason.
+    char drainStr[16];
+    int drainMs = AudioStats::drainThresholdMs.load(std::memory_order_relaxed);
+    if (drainMs > 0) {
+        snprintf(drainStr, sizeof(drainStr), "%d ms", drainMs);
+    }
+    else {
+        snprintf(drainStr, sizeof(drainStr), "off");
+    }
+
     ret = snprintf(&output[offset],
                    length - offset,
-                   "Audio queue: %d ms (peak %d ms)\n"
+                   "Audio queue: %d ms (peak %d ms), limits: drain %s / drop %d ms\n"
                    "Audio frames dropped: %d over threshold, %d drained\n",
                    LiGetPendingAudioDuration(),
                    AudioStats::pendingPeakMs.load(std::memory_order_relaxed),
+                   drainStr,
+                   AudioStats::dropThresholdMs.load(std::memory_order_relaxed),
                    AudioStats::hardDrops.load(std::memory_order_relaxed),
                    AudioStats::drainDrops.load(std::memory_order_relaxed));
     if (ret < 0 || ret >= length - offset) {
@@ -999,7 +1010,7 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
 void FFmpegVideoDecoder::logVideoStats(VIDEO_STATS& stats, const char* title)
 {
     if (stats.renderedFps > 0 || stats.renderedFrames != 0) {
-        char videoStatsStr[768];
+        char videoStatsStr[1024];
         stringifyVideoStats(stats, videoStatsStr, sizeof(videoStatsStr));
 
         SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,

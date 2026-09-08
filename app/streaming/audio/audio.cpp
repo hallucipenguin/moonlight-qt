@@ -142,6 +142,12 @@ int Session::arInit(int /* audioConfiguration */,
                     void* /* arContext */, int /* arFlags */)
 {
     SDL_memcpy(&s_ActiveSession->m_OriginalAudioConfig, opusConfig, sizeof(*opusConfig));
+
+    // Reset here rather than in the renderer constructor, which also runs on
+    // the mid-session reinit path below. Losing the peak when an audio device
+    // hiccups would discard the measurement at its most interesting moment.
+    AudioStats::reset();
+
     s_ActiveSession->initializeAudioRenderer();
     return 0;
 }

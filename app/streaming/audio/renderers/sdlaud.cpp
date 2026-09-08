@@ -6,6 +6,8 @@ namespace AudioStats {
     std::atomic<int> pendingPeakMs(0);
     std::atomic<int> hardDrops(0);
     std::atomic<int> drainDrops(0);
+    std::atomic<int> dropThresholdMs(0);
+    std::atomic<int> drainThresholdMs(0);
 
     void reset()
     {
@@ -23,15 +25,24 @@ namespace {
     constexpr Uint32 kDrainDwellMs = 2000;
 
     // At most one frame is shed per interval, so latency walks down gently
-    // rather than jumping. At 5 ms frames this drains ~10 ms per second.
+    // rather than jumping. One packet is 5 ms normally and 10 ms on low-bitrate
+    // streams (see AudioPacketDuration), so this drains 10-20 ms per second.
     constexpr Uint32 kDrainIntervalMs = 500;
 
-    // If no quiet frame turns up within this long, shed a loud one anyway. A
-    // 5 ms splice is well masked by audio loud enough to have kept us waiting.
+    // If no quiet frame turns up within this long of looking, shed a loud one
+    // anyway: audio that stayed above the quiet level for two seconds will mask
+    // a single-packet splice well enough.
     constexpr Uint32 kDrainForceMs = 2000;
 
+    // Arm the drain only once the backlog is this many packets above the
+    // target, and disarm at the target. Without the deadband the one-packet
+    // jitter of ordinary thread scheduling would trigger a pointless drop
+    // every few seconds forever.
+    constexpr int kDrainArmPackets = 2;
+
     // Peak sample magnitude (of full scale) below which removing a frame is
-    // inaudible: both sides of the splice are near zero, so there is no step.
+    // very unlikely to be heard: the frame carries near-silence, so the splice
+    // it leaves behind is a join between two near-zero points.
     constexpr float kQuietLevel = 0.01f;
 }
 
@@ -45,9 +56,24 @@ SdlAudioRenderer::SdlAudioRenderer(int audioPlaybackThresholdMs, int audioDropTh
       m_AudioDrainThresholdMs(SDL_max(0, audioDrainThresholdMs)),
       m_BacklogHighSinceMs(0),
       m_LastDrainMs(0),
+      m_DrainSearchSinceMs(0),
       m_WaitingForPlaybackThreshold(audioPlaybackThresholdMs > 0)
 {
-    AudioStats::reset();
+    // The drain has room to work only below the drop threshold, because
+    // submitAudio() returns early above it. A value at or above the drop
+    // threshold is not a gentler setting, it is an inert one, so refuse it
+    // loudly rather than leave the user wondering why nothing happens.
+    if (m_AudioDrainThresholdMs > 0 && m_AudioDrainThresholdMs >= m_AudioDropThresholdMs) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                    "Audio drain threshold (%d ms) must be below the drop threshold (%d ms). "
+                    "Disabling drain.",
+                    m_AudioDrainThresholdMs,
+                    m_AudioDropThresholdMs);
+        m_AudioDrainThresholdMs = 0;
+    }
+
+    AudioStats::dropThresholdMs.store(m_AudioDropThresholdMs, std::memory_order_relaxed);
+    AudioStats::drainThresholdMs.store(m_AudioDrainThresholdMs, std::memory_order_relaxed);
 
     SDL_assert(!SDL_WasInit(SDL_INIT_AUDIO));
 
@@ -179,24 +205,48 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
     // Dropping here (before the backpressure loop below) is what actually
     // drains the queue: the decoder thread does not wait on this frame, so it
     // picks up the next packet immediately.
-    if (m_AudioDrainThresholdMs > 0 && pendingMs > m_AudioDrainThresholdMs) {
+    if (m_AudioDrainThresholdMs > 0) {
         Uint32 now = SDL_GetTicks();
 
-        if (m_BacklogHighSinceMs == 0) {
-            // Start the dwell timer. Bias off zero, which is the "not high" sentinel.
-            m_BacklogHighSinceMs = (now == 0) ? 1 : now;
+        // Arm above the target by a margin but only disarm at the target
+        // itself. The deadband matters: the queue depth jitters by a packet
+        // either way just from thread scheduling, so arming and disarming on
+        // the same value would shed a frame every few seconds indefinitely
+        // without ever lowering latency.
+        int armAboveMs = m_AudioDrainThresholdMs + (kDrainArmPackets * (int)m_FrameDurationMs);
+
+        if (pendingMs > armAboveMs) {
+            if (m_BacklogHighSinceMs == 0) {
+                // Start the dwell timer. Bias off zero, the "not high" sentinel.
+                m_BacklogHighSinceMs = (now == 0) ? 1 : now;
+            }
         }
-        else if (now - m_BacklogHighSinceMs >= kDrainDwellMs &&
-                 now - m_LastDrainMs >= kDrainIntervalMs &&
-                 (isQuietFrame(bytesWritten) || now - m_LastDrainMs >= kDrainForceMs)) {
-            m_LastDrainMs = now;
-            AudioStats::drainDrops.fetch_add(1, std::memory_order_relaxed);
-            return true;
+        else if (pendingMs <= m_AudioDrainThresholdMs) {
+            // Back at the target, so a later rise starts a fresh dwell.
+            m_BacklogHighSinceMs = 0;
+            m_DrainSearchSinceMs = 0;
         }
-    }
-    else {
-        // Backlog is comfortable again, so a later rise starts a fresh dwell.
-        m_BacklogHighSinceMs = 0;
+
+        if (m_BacklogHighSinceMs != 0 &&
+                now - m_BacklogHighSinceMs >= kDrainDwellMs &&
+                now - m_LastDrainMs >= kDrainIntervalMs) {
+            // Eligible to shed a frame. Start looking for a quiet one, and time
+            // the search from here rather than from the last drop: the previous
+            // drop always predates the dwell, so timing from it would make the
+            // first cut of every episode a forced one and the quiet check dead
+            // code exactly where it is needed most.
+            if (m_DrainSearchSinceMs == 0) {
+                m_DrainSearchSinceMs = (now == 0) ? 1 : now;
+            }
+
+            if (isQuietFrame(bytesWritten) ||
+                    now - m_DrainSearchSinceMs >= kDrainForceMs) {
+                m_LastDrainMs = now;
+                m_DrainSearchSinceMs = 0;
+                AudioStats::drainDrops.fetch_add(1, std::memory_order_relaxed);
+                return true;
+            }
+        }
     }
 
     // Provide backpressure on the queue to ensure too many frames don't build up
@@ -245,7 +295,10 @@ bool SdlAudioRenderer::submitAudio(int bytesWritten)
     return true;
 }
 
-// True if this frame is quiet enough that removing it leaves no audible step.
+// True if this frame carries near-silence, in which case removing it is very
+// unlikely to be heard. Only the frame being removed is inspected, not its
+// neighbours, so this is a heuristic: a window this short sitting below the
+// quiet level is almost always surrounded by quiet too.
 // getAudioBufferFormat() is Float32NE, so the buffer is normalized floats.
 bool SdlAudioRenderer::isQuietFrame(int bytesWritten)
 {

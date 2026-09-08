@@ -32,5 +32,6 @@ private:
     int m_AudioDrainThresholdMs;
     Uint32 m_BacklogHighSinceMs;
     Uint32 m_LastDrainMs;
+    Uint32 m_DrainSearchSinceMs;
     bool m_WaitingForPlaybackThreshold;
 };
