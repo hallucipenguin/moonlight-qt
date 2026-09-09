@@ -9,11 +9,18 @@ OverlayManager::OverlayManager() :
 {
     memset(m_Overlays, 0, sizeof(m_Overlays));
 
+    // The overlay is drawn in raw pixels, so on a Retina display the stock
+    // 20 px debug font is about 3 mm tall. Tripled, with the outline and the
+    // wrap limit scaled to match so lines keep their layout.
     m_Overlays[OverlayType::OverlayDebug].color = {0xD0, 0xD0, 0x00, 0xFF};
-    m_Overlays[OverlayType::OverlayDebug].fontSize = 20;
+    m_Overlays[OverlayType::OverlayDebug].fontSize = 60;
+    m_Overlays[OverlayType::OverlayDebug].outlineWidth = 12;
+    m_Overlays[OverlayType::OverlayDebug].wrapWidth = 3072;
 
     m_Overlays[OverlayType::OverlayStatusUpdate].color = {0xCC, 0x00, 0x00, 0xFF};
     m_Overlays[OverlayType::OverlayStatusUpdate].fontSize = 36;
+    m_Overlays[OverlayType::OverlayStatusUpdate].outlineWidth = 4;
+    m_Overlays[OverlayType::OverlayStatusUpdate].wrapWidth = 1024;
 
     // While TTF will usually not be initialized here, it is valid for that not to
     // be the case, since Session destruction is deferred and could overlap with
@@ -153,8 +160,8 @@ void OverlayManager::notifyOverlayUpdated(OverlayType type)
                                       m_Overlays[type].text,
                                       m_Overlays[type].color,
                                       {0, 0, 0, 255},
-                                      4,
-                                      1024)
+                                      m_Overlays[type].outlineWidth,
+                                      m_Overlays[type].wrapWidth)
             : nullptr);
 
     // Notify the renderer

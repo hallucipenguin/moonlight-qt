@@ -21,10 +21,10 @@ public:
 
 private:
     void configureDrain(const SDL_AudioSpec& have);
-    bool isQuietFrame(int bytesWritten);
 
     SDL_AudioDeviceID m_AudioDevice;
     void* m_AudioBuffer;
+    void* m_DrainScratch;          // time-compressed copy of a frame
     Uint32 m_FrameSize;
     Uint32 m_FrameDurationMs;
     int m_BytesPerMs;
@@ -36,7 +36,8 @@ private:
     Uint32 m_DeviceChunkMs;        // audio the device pulls per callback
     Uint32 m_MaxQueuedAudioMs;     // backpressure cap on SDL's queue
     Uint32 m_BacklogHighSinceMs;
-    Uint32 m_LastDrainMs;
-    Uint32 m_DrainSearchSinceMs;
+    int m_Channels;
+    int m_SampleRate;
+    Uint64 m_DrainedSamples;       // per channel, for the overlay's ms figure
     bool m_WaitingForPlaybackThreshold;
 };

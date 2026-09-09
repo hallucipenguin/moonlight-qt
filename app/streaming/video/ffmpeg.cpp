@@ -1031,11 +1031,12 @@ void FFmpegVideoDecoder::stringifyVideoStats(VIDEO_STATS& stats, char* output, i
     ret = snprintf(&output[offset],
                    length - offset,
                    "Audio limits: drop above %d ms in Moonlight, %s\n"
-                   "Audio frames dropped: %d over threshold, %d drained\n",
+                   "Audio dropped: %d frames over threshold, %d ms by the drain%s\n",
                    AudioStats::dropThresholdMs.load(std::memory_order_relaxed),
                    drainStr,
                    AudioStats::hardDrops.load(std::memory_order_relaxed),
-                   AudioStats::drainDrops.load(std::memory_order_relaxed));
+                   AudioStats::drainedMs.load(std::memory_order_relaxed),
+                   AudioStats::drainActive.load(std::memory_order_relaxed) ? " (draining now)" : "");
     if (ret < 0 || ret >= length - offset) {
         SDL_assert(false);
         return;

@@ -46,6 +46,8 @@ private:
     struct {
         bool enabled;
         int fontSize;
+        int outlineWidth;
+        int wrapWidth;
         SDL_Color color;
         char text[2048];
 

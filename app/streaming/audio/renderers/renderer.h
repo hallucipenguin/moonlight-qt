@@ -64,7 +64,8 @@ namespace AudioStats {
     extern std::atomic<int> pendingPeakMs;  // high-water mark of pendingMs
     extern std::atomic<int> totalPeakMs;    // high-water mark of pendingMs + sdlQueuedMs
     extern std::atomic<int> hardDrops;      // frames discarded at the drop threshold
-    extern std::atomic<int> drainDrops;     // frames discarded to walk the backlog down
+    extern std::atomic<int> drainedMs;      // audio removed by the drain so far
+    extern std::atomic<int> drainActive;    // 1 while the drain is shrinking packets
 
     // SDL_GetTicks() when the sample above was taken, 0 if never. Lets the
     // overlay say so when audio has stopped flowing (mute, device loss, host
